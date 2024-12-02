@@ -1,3 +1,27 @@
+// Smart Dipstick V1.1 Code
+// Created by the Smart Dipstick Team at Georgia Tech Fall 2024
+// Cody Ells, Daniel Luna, Ori Krasnovsky, Michael McDonald, Leo Lin
+
+// Uses FreeRtos library for SAMD21 created by Scott Briscoe
+// and nRF51822 library created by Adafruit
+
+// Runs on the Adafruit Feather M0 Bluefruit LE Microcontroller
+
+//**************************************************************************
+// FreeRtos on Samd21
+// By Scott Briscoe
+//**************************************************************************
+
+#include <FreeRTOS_SAMD21.h>
+
+//**************************************************************************
+// Type Defines and Constants
+//**************************************************************************
+
+// Select the serial port the project should use and communicate over
+// Some boards use SerialUSB, some use Serial
+#define MY_SERIAL          Serial //Adafruit, other Samd21 Boards (What we desire for Adafruit's Feather M0 boards)
+
 /*********************************************************************
  This is an example for our nRF51822 based Bluefruit LE modules
 
@@ -81,6 +105,12 @@ Adafruit_BluefruitLE_SPI ble(BLUEFRUIT_SPI_CS, BLUEFRUIT_SPI_IRQ, BLUEFRUIT_SPI_
 
 
 /**************************************************************************/
+
+//**************************************************************************
+// global variables
+//**************************************************************************
+TaskHandle_t Handle_sampleCollection;
+TaskHandle_t Handle_bluetoothOutput;
 
 // Setup for the Thermistor
 
@@ -197,9 +227,127 @@ oilBadDatabase badOil[range] = {
   { 100.0, 105.0, -3.25 } // Cutoff at 3.25 since becoming too close to 3.3V
 };
 
+//**************************************************************************
+// Can use these function for RTOS delays
+// Takes into account processor speed
+// Use these instead of delay(...) in rtos tasks											
+//**************************************************************************
 
-// Function for determining if Oil is good, bad, or close to needing change
+void myDelayMs(int ms)
+{
+  vTaskDelay( (ms * 1000) / portTICK_PERIOD_US );  
+}
 
+//**************************************************************************
+
+// Thread for taking oil samples
+static void sampleCollection( void *pvParameters ) 
+{
+  while(true)
+  {
+    // Read the voltage from the analog pins
+    Vo = analogRead(ThermistorPin);
+    V1 = analogRead(oilResitivityPin);
+
+    // Obtain resistance of thermistor
+    R2 = R1 * (1023.0 / (float)Vo - 1.0);
+
+    // Calucate the temperature in Celsius (From Thermistor Manufacturer)
+    T = 1 / (A + B * log(R2 / R1) + C * pow(log(R2 / R1), 2) + D * pow(log(R2 / R1), 3)) - 273.15;
+
+    // Store the new sample in the buffer
+    tempSamples[tempIndex] = T;
+    oilSamples[oilIndex] = (((V1 * 3300.0F/1024.0F / 1000)-3.3)*(10000+20000))/10000+3.3;
+
+    // Reset indexes properly as we go through our loop over time
+    tempIndex = (tempIndex + 1) % 100;
+    oilIndex = (oilIndex + 1) % 1000;
+
+    // Check if the oil buffer is fully filled since it is the longest to fill
+    if (oilIndex == 0) {
+      bufferFilled = true;
+    }
+
+    // Wait 10 ms before taking next sample
+    myDelayMs(10);
+  }
+}
+
+// Thread for sending data over BLE
+static void bluetoothOutput( void *pvParameters ) 
+{
+  while(true)
+  {
+    // Calculate the average if the buffer is filled
+    // Send delay will make sure 0.5 seconds pass before trying to send data for the bluetooth again
+    if (bufferFilled)
+    {
+      totalTemp = 0.0;  // Immediately reset after average calculation
+      totalOil = 0.0;
+
+      // cycle through to obtain the 100 current values in circular buffer and then add them all together
+      for (int i = 0; i < 100; i++)
+      {
+        totalTemp += tempSamples[i];
+      }
+
+      // cycle through to obtain the 1000 current values in circular buffer and then add them all together
+      for (int i = 0; i < 1000; i++)
+      {
+        totalOil += oilSamples[i];
+      }
+
+      // Find average temperature from current 100 samples
+      float avgTempC = totalTemp / 100;
+
+      // Find average oil voltage from current 1000 samples
+      float avgOilVoltage = totalOil/1000.0;
+
+      // Print the average temperature
+      // Print the average temperature in Celsius
+      Serial.print("Oil Temp: ");
+      Serial.print(avgTempC, 2);
+      Serial.println(" degrees C");
+      // Convert from C to F and print it
+      float avgTempF = (avgTempC * 9.0) / 5.0 + 32.0;
+      // Print the average temperature in Fahrenheit
+      Serial.print("Oil Temp: ");
+      Serial.print(avgTempF, 2);
+      Serial.println(" degrees F");
+      Serial.print("Voltage of the oil: ");
+      Serial.println(avgOilVoltage, 4);
+
+      //Send input data to host via Bluefruit
+
+      // Status is an int (essentially enum) that is sent to the app
+      // which outputs a message based on what state it recieves:
+      // 0 = oil is good, no change needed
+      // 1 = oil is bad, change needed soon
+      // 2 = oil is bad, needs a change!
+      // 3 = need more oil!
+
+      //INT good WILL BE BASED UPON THE READING OF TEMPERATURE AND VOLTAGE INPUT FROM THE CICRUIT FROM THE OIL
+      int good = oilCheck(avgTempC, avgOilVoltage);
+
+      // Output information to the bluetooth device
+      ble.print(String(good) + "#");
+      ble.print(String(avgTempF) + "#");
+      ble.print(String(avgTempC) + "#");
+      //ble.print(avgOilVoltage, 4);
+      ble.println("cfrm");
+
+      // Reset the total temp
+      totalTemp = 0.0;
+      totalOil = 0.0;
+
+      //Reset the Send Delay
+      sendDelay = -1;
+    }
+
+    // Wait 500 before sending new info to phone
+    myDelayMs(500);
+  }
+}
 
 /**************************************************************************/
 
@@ -220,6 +368,9 @@ void setup(void)
   // Setup perfomred over next 3 lines so that microcontroller sends out
   // values without need of connection to computer serial terminal
   Serial.begin(115200);
+
+  delay(1000); // prevents usb driver crash on startup, do not omit this
+
   unsigned long start = millis();
   while (!Serial && millis() - start < 5000); // Wait up to 5 seconds
 
@@ -290,6 +441,23 @@ void setup(void)
       oilSamples[i] = 0.0;
   }
 
+  // Create the threads that will be managed by the rtos
+  // Sets the stack size and priority of each task
+  // Also initializes a handler pointer to each task, which are important to communicate with and retrieve info from tasks
+  xTaskCreate(sampleCollection, "sampleCollection", 1024, NULL, tskIDLE_PRIORITY + 1, &Handle_sampleCollection);
+  xTaskCreate(bluetoothOutput, "bluetoothOutput", 1024, NULL, tskIDLE_PRIORITY, &Handle_bluetoothOutput);
+
+  // Start the RTOS, this function will never return and will schedule the tasks.
+  vTaskStartScheduler();
+
+  // error scheduler failed to start
+  // should never get here
+  while(1)
+  {
+	  Serial.println("Scheduler Failed! \n");
+	  Serial.flush();
+	  delay(1000);
+  }
 }
 
 /**************************************************************************/
@@ -327,103 +495,11 @@ int oilCheck(float avgTempC, float avgOilVoltage)
   return 1;  // Default to "close to needing a change" if no specific range matches
 }
 
-// Main loop
+// Main loop (Empty as all functionality is run through threads)
 void loop(void)
 {
-  // Timing measurements so that data is only send every 2 seconds total
-  static unsigned long timeNow = 0;
-  static unsigned long timeTotal = 0;
-
-  // Read the voltage from the analog pins
-  Vo = analogRead(ThermistorPin);
-  V1 = analogRead(oilResitivityPin);
-
-  // Obtain resistance of thermistor
-  R2 = R1 * (1023.0 / (float)Vo - 1.0);
-
-  // Calucate the temperature in Celsius (From Thermistor Manufacturer)
-  T = 1 / (A + B * log(R2 / R1) + C * pow(log(R2 / R1), 2) + D * pow(log(R2 / R1), 3)) - 273.15;
-
-  // Store the new sample in the buffer
-  tempSamples[tempIndex] = T;
-  oilSamples[oilIndex] = (((V1 * 3300.0F/1024.0F / 1000)-3.3)*(10000+20000))/10000+3.3;
-
-  // Reset indexes properly as we go through our loop over time
-  tempIndex = (tempIndex + 1) % 100;
-  oilIndex = (oilIndex + 1) % 1000;
-
-  // Check if the oil buffer is fully filled since it is the longest to fill
-  if (oilIndex == 0) {
-    bufferFilled = true;
-  }
-
-  // Calculate the average if the buffer is filled
-  // Send delay will make sure 0.5 seconds pass before trying to send data for the bluetooth again
-  if (bufferFilled && (sendDelay >= 50))
-  {
-    totalTemp = 0.0;  // Immediately reset after average calculation
-    totalOil = 0.0;
-
-    // cycle through to obtain the 100 current values in circular buffer and then add them all together
-    for (int i = 0; i < 100; i++)
-    {
-      totalTemp += tempSamples[i];
-    }
-
-    // cycle through to obtain the 1000 current values in circular buffer and then add them all together
-    for (int i = 0; i < 1000; i++)
-    {
-      totalOil += oilSamples[i];
-    }
-
-    // Find average temperature from current 100 samples
-    float avgTempC = totalTemp / 100;
-
-    // Find average oil voltage from current 1000 samples
-    float avgOilVoltage = totalOil/1000.0;
-
-    // Print the average temperature
-    // Print the average temperature in Celsius
-    Serial.print("Oil Temp: ");
-    Serial.print(avgTempC, 2);
-    Serial.println(" degrees C");
-    // Convert from C to F and print it
-    float avgTempF = (avgTempC * 9.0) / 5.0 + 32.0;
-    // Print the average temperature in Fahrenheit
-    Serial.print("Oil Temp: ");
-    Serial.print(avgTempF, 2);
-    Serial.println(" degrees F");
-    Serial.print("Voltage of the oil: ");
-    Serial.println(avgOilVoltage, 4);
-
-    //Send input data to host via Bluefruit
-
-    // Status is an int (essentially enum) that is sent to the app
-    // which outputs a message based on what state it recieves:
-    // 0 = oil is good, no change needed
-    // 1 = oil is bad, change needed soon
-    // 2 = oil is bad, needs a change!
-    // 3 = need more oil!
-
-    //INT good WILL BE BASED UPON THE READING OF TEMPERATURE AND VOLTAGE INPUT FROM THE CICRUIT FROM THE OIL
-    int good = oilCheck(avgTempC, avgOilVoltage);
-
-    // Output information to the bluetooth device
-    ble.print(String(good) + "#");
-    ble.print(String(avgTempF) + "#");
-    ble.print(String(avgTempC) + "#");
-    //ble.print(avgOilVoltage, 4);
-    ble.println("cfrm");
-
-    // Reset the total temp
-    totalTemp = 0.0;
-    totalOil = 0.0;
-
-    //Reset the Send Delay
-    sendDelay = -1;
-  }
-
-  // Wait 10 ms before taking the next sample to maintain 1000 samples per second
-  delay(10);
-  sendDelay++;
 }
+
+
+
+

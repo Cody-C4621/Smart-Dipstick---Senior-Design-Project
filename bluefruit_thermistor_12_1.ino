@@ -113,48 +113,88 @@ float B = 0.000261842759267469;
 float C = 3.92235933627021e-06;
 float D = 1.39503244666293e-07;
 
-//TODO: Better comments here:
-// Buffer for storing the last 1000 samples
-float tempSamples[1000];
+// Circular buffers for storing the last 1000 samples
+float tempSamples[100];
 float oilSamples[1000];
-volatile int sampleIndex = 0;
+
+// Ints for tracking indexes of circular buffers
+volatile int tempIndex = 0;
+volatile int oilIndex = 0;
+
+// Boolean for when we can start sending bluetooth data
 bool bufferFilled = false;
+
+// Declare floats for total averages of temp and oil voltage
 volatile float totalTemp = 0.0;
 volatile float totalOil = 0.0;
 
+// helps delay time between sending bluetooth data to phone app
+volatile int sendDelay = 0;
+
 // Databases of Oil temps and oil voltages for both good and bad oil.
+// Our databases will be in degrees celsius and be for 5 degree measures
+
+// For anything between our good maximum and bad minimum voltage measures,
+// we find that the oil is close to needing a change
 
 // Struct for how good oil data gets stored
+// Good oil only needs a max voltage threshold before we consider it no longer good
 struct oilGoodDatabase {
   float tempMin;
   float tempMax;
-  float voltMin;
   float voltMax;
 };
 
 // Struct for how bad oil data gets stored
-// No max needed
+// Bad oil only needs a minimum voltage threshold before we consider it to be bad
 struct oilBadDatabase {
   float tempMin;
   float tempMax;
   float voltMin;
 };
 
-// CHANGE BASED UPON HOW MANY SAMPLES WE WILL HAVE
-const int range = 1;
+// Based upon the 17 oil ranges we took values of
+const int range = 17;
 
 oilGoodDatabase goodOil[range] = {
-  // Each one of these is a range of temps and voltage
-  // For example, from 20.0 to 21.0 C, the oil was tested at being ~0.15
-  // and would jump upwards of 0.16 and downwards of 0.14, so we use a 
-  // +/- of 0.015. This may apply to all samples, maybe not.
-  { 20.0, 21.0, 0.135, 0.165 }
+  { 20.0, 25.0, -0.15 },
+  { 25.0, 30.0, -0.2 },
+  { 30.0, 35.0, -0.29 },
+  { 35.0, 40.0, -0.38 },
+  { 40.0, 45.0, -0.47 },
+  { 45.0, 50.0, -0.6 },
+  { 50.0, 55.0, -0.71 },
+  { 55.0, 60.0, -0.87 },
+  { 60.0, 65.0, -1.01 },
+  { 65.0, 70.0, -1.19 },
+  { 70.0, 75.0, -1.39 },
+  { 75.0, 80.0, -1.62 },
+  { 80.0, 85.0, -1.86 },
+  { 85.0, 90.0, -2.13 },
+  { 90.0, 95.0, -2.51 },
+  { 95.0, 100.0, -3.0 },
+  { 100.0, 105.0, -3.21 }
 };
 
 // Should be same temp ranges as good oil, but different voltage ranges
 oilBadDatabase badOil[range] = {
-  // THESE ARE NOT KNOWN CORRECT VOLTAGE VALUES, WE NEED TO FIND THOSE STILL
-  { 20.0, 21.0, 0.175 }
+  { 20.0, 25.0, -0.16 },
+  { 25.0, 30.0, -0.21 },
+  { 30.0, 35.0, -0.3 },
+  { 35.0, 40.0, -0.4 },
+  { 40.0, 45.0, -0.5 },
+  { 45.0, 50.0, -0.6 },
+  { 50.0, 55.0, -0.8 },
+  { 55.0, 60.0, -1.0 },
+  { 60.0, 65.0, -1.2 },
+  { 65.0, 70.0, -1.4 },
+  { 70.0, 75.0, -1.7 },
+  { 75.0, 80.0, -2.0 },
+  { 80.0, 85.0, -2.4 },
+  { 85.0, 90.0, -2.8 },
+  { 90.0, 95.0, -3.1 },
+  { 95.0, 100.0, -3.25 },
+  { 100.0, 105.0, -3.25 } // Cutoff at 3.25 since becoming too close to 3.3V
 };
 
 
@@ -238,12 +278,16 @@ void setup(void)
 
   Serial.println(F("******************************"));
 
-  // Begin setup for the Thermistor Circular buffer:
-  // Setup circular buffer for values
-  for (int i = 0; i < 1000; i++)
-  {
-    tempSamples[i] = 0.0;
-    oilSamples[i] = 0.0;
+  // Begin setup for the circular buffers:
+
+  // Initialize tempSamples with 100 elements
+  for (int i = 0; i < 100; i++) {
+      tempSamples[i] = 0.0;
+  }
+
+  // Initialize oilSamples with 1000 elements
+  for (int i = 0; i < 1000; i++) {
+      oilSamples[i] = 0.0;
   }
 
 }
@@ -254,17 +298,44 @@ void setup(void)
 */
 /**************************************************************************/
 
-volatile int n = 0;
+// Helper function to determine if oil condition is good, in need of change soon, or in need of change now
+int oilCheck(float avgTempC, float avgOilVoltage)
+{
+  // Start by finding which set of temperature ranges the current oil temp falls into
+  for (int i = 0; i < range; i++) 
+  {
+    if (avgTempC >= goodOil[i].tempMin && avgTempC <= goodOil[i].tempMax) 
+    {
+      // Case where there is actually not enough oil to measure
+      if (avgOilVoltage >= 0.00)
+      {
+        return 3; // Oil is unmeasureable as the dipstick is not submersed in oil
+      }
+      // If greater than the max, oil is good
+      if (avgOilVoltage >= goodOil[i].voltMax) 
+      {
+        return 0;  // Oil is good, no change needed
+      }
+      // If lower than the min, oil is bad
+      if (avgOilVoltage <= badOil[i].voltMin) 
+      {
+        return 2;  // Oil is bad, needs a change
+      }
+    }
+  }
+  // Otherwise, oil is inbetween max good and min bad, so we are close to needing change
+  return 1;  // Default to "close to needing a change" if no specific range matches
+}
 
+// Main loop
 void loop(void)
 {
   // Timing measurements so that data is only send every 2 seconds total
   static unsigned long timeNow = 0;
   static unsigned long timeTotal = 0;
 
-  // Read the voltage from the analog pin
+  // Read the voltage from the analog pins
   Vo = analogRead(ThermistorPin);
-
   V1 = analogRead(oilResitivityPin);
 
   // Obtain resistance of thermistor
@@ -274,30 +345,41 @@ void loop(void)
   T = 1 / (A + B * log(R2 / R1) + C * pow(log(R2 / R1), 2) + D * pow(log(R2 / R1), 3)) - 273.15;
 
   // Store the new sample in the buffer
-  tempSamples[sampleIndex] = T;
-  oilSamples[sampleIndex] = (((V1 * 3300.0F/1024.0F / 1000)-3.3)*(10000+20000))/10000+3.3;
+  tempSamples[tempIndex] = T;
+  oilSamples[oilIndex] = (((V1 * 3300.0F/1024.0F / 1000)-3.3)*(10000+20000))/10000+3.3;
 
-  // Increment the index and wrap around if necessary
-  sampleIndex = (sampleIndex + 1) % 1000;
+  // Reset indexes properly as we go through our loop over time
+  tempIndex = (tempIndex + 1) % 100;
+  oilIndex = (oilIndex + 1) % 1000;
 
-  // Check if the buffer is fully filled
-  if (sampleIndex == 0) {
+  // Check if the oil buffer is fully filled since it is the longest to fill
+  if (oilIndex == 0) {
     bufferFilled = true;
   }
 
   // Calculate the average if the buffer is filled
-  if (bufferFilled)
+  // Send delay will make sure 0.5 seconds pass before trying to send data for the bluetooth again
+  if (bufferFilled && (sendDelay >= 50))
   {
+    totalTemp = 0.0;  // Immediately reset after average calculation
+    totalOil = 0.0;
 
     // cycle through to obtain the 100 current values in circular buffer and then add them all together
-    for (int i = 0; i < 1000; i++)
+    for (int i = 0; i < 100; i++)
     {
       totalTemp += tempSamples[i];
+    }
+
+    // cycle through to obtain the 1000 current values in circular buffer and then add them all together
+    for (int i = 0; i < 1000; i++)
+    {
       totalOil += oilSamples[i];
     }
 
     // Find average temperature from current 100 samples
-    float avgTempC = totalTemp / 1000;
+    float avgTempC = totalTemp / 100;
+
+    // Find average oil voltage from current 1000 samples
     float avgOilVoltage = totalOil/1000.0;
 
     // Print the average temperature
@@ -305,14 +387,12 @@ void loop(void)
     Serial.print("Oil Temp: ");
     Serial.print(avgTempC, 2);
     Serial.println(" degrees C");
-    
     // Convert from C to F and print it
     float avgTempF = (avgTempC * 9.0) / 5.0 + 32.0;
     // Print the average temperature in Fahrenheit
     Serial.print("Oil Temp: ");
     Serial.print(avgTempF, 2);
     Serial.println(" degrees F");
-
     Serial.print("Voltage of the oil: ");
     Serial.println(avgOilVoltage, 4);
 
@@ -323,22 +403,27 @@ void loop(void)
     // 0 = oil is good, no change needed
     // 1 = oil is bad, change needed soon
     // 2 = oil is bad, needs a change!
+    // 3 = need more oil!
 
     //INT good WILL BE BASED UPON THE READING OF TEMPERATURE AND VOLTAGE INPUT FROM THE CICRUIT FROM THE OIL
-    int good = 0;
+    int good = oilCheck(avgTempC, avgOilVoltage);
 
-    //ble.print(String(good) + "#");
-    //ble.print(String(avgTempF) + "#");
-    //ble.print(String(avgTempC) + "#");
-    ble.print(avgOilVoltage, 4);
-    ble.println("#cfrm");
+    // Output information to the bluetooth device
+    ble.print(String(good) + "#");
+    ble.print(String(avgTempF) + "#");
+    ble.print(String(avgTempC) + "#");
+    //ble.print(avgOilVoltage, 4);
+    ble.println("cfrm");
 
     // Reset the total temp
     totalTemp = 0.0;
     totalOil = 0.0;
 
+    //Reset the Send Delay
+    sendDelay = -1;
   }
 
   // Wait 10 ms before taking the next sample to maintain 1000 samples per second
   delay(10);
+  sendDelay++;
 }

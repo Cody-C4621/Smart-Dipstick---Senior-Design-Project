@@ -161,11 +161,8 @@ volatile float totalOil = 0.0;
 // helps delay time between sending bluetooth data to phone app
 volatile int sendDelay = 0;
 
-// Databases of Oil temps and oil voltages for both good and bad oil.
+// Databases of Oil temps and oil voltages for both good oil.
 // Our databases will be in degrees celsius and be for 5 degree measures
-
-// For anything between our good maximum and bad minimum voltage measures,
-// we find that the oil is close to needing a change
 
 // Struct for how good oil data gets stored
 // Good oil only needs a max voltage threshold before we consider it no longer good
@@ -175,56 +172,43 @@ struct oilGoodDatabase {
   float voltMax;
 };
 
-// Struct for how bad oil data gets stored
-// Bad oil only needs a minimum voltage threshold before we consider it to be bad
-struct oilBadDatabase {
-  float tempMin;
-  float tempMax;
-  float voltMin;
-};
-
-// Based upon the 17 oil ranges we took values of
-const int range = 17;
+// Based upon the 34 oil ranges we took values of
+const int range = 34;
 
 oilGoodDatabase goodOil[range] = {
-  { 20.0, 25.0, -0.15 },
-  { 25.0, 30.0, -0.2 },
-  { 30.0, 35.0, -0.29 },
-  { 35.0, 40.0, -0.38 },
-  { 40.0, 45.0, -0.47 },
-  { 45.0, 50.0, -0.6 },
-  { 50.0, 55.0, -0.71 },
-  { 55.0, 60.0, -0.87 },
-  { 60.0, 65.0, -1.01 },
-  { 65.0, 70.0, -1.19 },
-  { 70.0, 75.0, -1.39 },
-  { 75.0, 80.0, -1.62 },
-  { 80.0, 85.0, -1.86 },
-  { 85.0, 90.0, -2.13 },
-  { 90.0, 95.0, -2.51 },
-  { 95.0, 100.0, -3.0 },
-  { 100.0, 105.0, -3.21 }
-};
-
-// Should be same temp ranges as good oil, but different voltage ranges
-oilBadDatabase badOil[range] = {
-  { 20.0, 25.0, -0.16 },
-  { 25.0, 30.0, -0.21 },
-  { 30.0, 35.0, -0.3 },
-  { 35.0, 40.0, -0.4 },
-  { 40.0, 45.0, -0.5 },
-  { 45.0, 50.0, -0.6 },
-  { 50.0, 55.0, -0.8 },
-  { 55.0, 60.0, -1.0 },
-  { 60.0, 65.0, -1.2 },
-  { 65.0, 70.0, -1.4 },
-  { 70.0, 75.0, -1.7 },
-  { 75.0, 80.0, -2.0 },
-  { 80.0, 85.0, -2.4 },
-  { 85.0, 90.0, -2.8 },
-  { 90.0, 95.0, -3.1 },
-  { 95.0, 100.0, -3.25 },
-  { 100.0, 105.0, -3.25 } // Cutoff at 3.25 since becoming too close to 3.3V
+    { 22.5, 25.0, -0.1 },
+    { 25.0, 27.5, -0.2 },
+    { 27.5, 30.0, -0.25 },
+    { 30.0, 32.5, -0.28 },
+    { 32.5, 35.0, -0.32 },
+    { 35.0, 37.5, -0.36 },
+    { 37.5, 40.0, -0.4 },
+    { 40.0, 42.5, -0.445 },
+    { 42.5, 45.0, -0.49 },
+    { 45.0, 47.5, -0.54 },
+    { 47.5, 50.0, -0.59 },
+    { 50.0, 52.5, -0.645 },
+    { 52.5, 55.0, -0.7 },
+    { 55.0, 57.5, -0.74 },
+    { 57.5, 60.0, -0.83 },
+    { 60.0, 62.5, -0.925 },
+    { 62.5, 65.0, -0.975 },
+    { 65.0, 67.5, -1.06 },
+    { 67.5, 70.0, -1.135 },
+    { 70.0, 72.5, -1.2 },
+    { 72.5, 75.0, -1.46 },
+    { 75.0, 77.5, -1.57 },
+    { 77.5, 80.0, -1.65 },
+    { 80.0, 82.5, -1.73 },
+    { 82.5, 85.0, -1.9 },
+    { 85.0, 87.5, -2.05 },
+    { 87.5, 90.0, -2.2 },
+    { 90.0, 92.5, -2.4 },
+    { 92.5, 95.0, -2.6 },
+    { 95.0, 97.5, -2.75 },
+    { 97.5, 100.0, -2.9 },
+    { 100.0, 102.5, -3.0 },
+    { 102.5, 105.0, -3.1 }
 };
 
 //**************************************************************************
@@ -303,19 +287,26 @@ static void bluetoothOutput( void *pvParameters )
       // Find average oil voltage from current 1000 samples
       float avgOilVoltage = totalOil/1000.0;
 
-      // Print the average temperature
-      // Print the average temperature in Celsius
-      Serial.print("Oil Temp: ");
-      Serial.print(avgTempC, 2);
-      Serial.println(" degrees C");
-      // Convert from C to F and print it
-      float avgTempF = (avgTempC * 9.0) / 5.0 + 32.0;
-      // Print the average temperature in Fahrenheit
-      Serial.print("Oil Temp: ");
-      Serial.print(avgTempF, 2);
-      Serial.println(" degrees F");
-      Serial.print("Voltage of the oil: ");
-      Serial.println(avgOilVoltage, 4);
+    Serial.println(F("******************************"));
+    Serial.println(F("Outputting new Readings!"));
+    Serial.println(F("******************************"));
+
+    // Print the average temperature
+    // Print the average temperature in Celsius
+    Serial.print("Oil Temp: ");
+    Serial.print(avgTempC, 2);
+    Serial.println(" degrees C");
+    // Convert from C to F and print it
+    float avgTempF = (avgTempC * 9.0) / 5.0 + 32.0;
+    // Print the average temperature in Fahrenheit
+    Serial.print("Oil Temp: ");
+    Serial.print(avgTempF, 2);
+    Serial.println(" degrees F");
+    Serial.print("Voltage of the oil: ");
+    Serial.println(avgOilVoltage, 4);
+
+    Serial.println(F("******************************"));
+    Serial.println(F("******************************"));
 
       //Send input data to host via Bluefruit
 
@@ -485,14 +476,14 @@ int oilCheck(float avgTempC, float avgOilVoltage)
         return 0;  // Oil is good, no change needed
       }
       // If lower than the min, oil is bad
-      if (avgOilVoltage <= badOil[i].voltMin) 
+      if (avgOilVoltage <= goodOil[i].voltMax * 1.18) 
       {
         return 2;  // Oil is bad, needs a change
       }
     }
   }
   // Otherwise, oil is inbetween max good and min bad, so we are close to needing change
-  return 1;  // Default to "close to needing a change" if no specific range matches
+  return 0;  // Default to "oil is good" if no specific range matches
 }
 
 // Main loop (Empty as all functionality is run through threads)
